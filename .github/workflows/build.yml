@@ -1,0 +1,78 @@
+# kisstack/reusable-workflows: .github/workflows/build.yml
+# Source of truth: wojimene/kisstack services/template-release/reusable-workflows/.github.tmpl/workflows/build.yml
+# Published byte-for-byte to kisstack/reusable-workflows (D-2026-10-14-04; Architect ruling 2026-10-14).
+# Unprivileged build (Threat Model §5): no secrets, no id-token, no cache, exactly one artifact.
+name: KISStack build
+
+"on":
+  workflow_call:
+    outputs:
+      artifact-id:
+        description: ID of the kisstack-build artifact (informational; Policy hashes the artifact itself).
+        value: ${{ jobs.build.outputs.artifact-id }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    env:
+      NPM_CONFIG_IGNORE_SCRIPTS: "true"
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+    steps:
+      - name: Refuse anything but a push to main
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$EVENT" != "push" ] || [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::KISStack build runs only on a push to main (got $EVENT $REF)"
+            exit 1
+          fi
+
+      - name: Check out the merged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node (no cache by rule)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.0"
+          package-manager-cache: false
+
+      - name: Install dependencies without install scripts
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build --ignore-scripts
+
+      - name: Check the build output
+        run: |
+          test -d dist || { echo "::error::npm run build must write dist/"; exit 1; }
+          if [ -n "$(find dist -type l)" ]; then echo "::error::dist/ contains a symlink"; exit 1; fi
+          size=$(find dist -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')
+          if [ "$size" -gt 950000 ]; then
+            echo "::error::dist/ is $size bytes; the limit is 950000 (Policy refuses artifacts over 1,000,000)"
+            exit 1
+          fi
+
+      - name: Upload the one build artifact
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kisstack-build
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
+          overwrite: false
